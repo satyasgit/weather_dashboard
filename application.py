@@ -8,10 +8,15 @@ from datetime import datetime
 load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 application = Flask(__name__)
 application.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
-OPENWEATHER_API_KEY = os.getenv('OPENWEATHER_API_KEY', 'your-api-key-here')
+OPENWEATHER_API_KEY = os.getenv('OPENWEATHER_API_KEY')
+
+if not OPENWEATHER_API_KEY:
+    logger.error("OpenWeather API key not found in environment variables")
+    raise ValueError("OpenWeather API key is required")
 
 def kelvin_to_celsius(kelvin):
     return round(kelvin - 273.15, 1)
@@ -20,27 +25,33 @@ def get_weather_forecast(city):
     try:
         # Get coordinates for the city
         geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={city}&limit=1&appid={OPENWEATHER_API_KEY}"
-        logging.debug(f"Calling Geocoding API: {geo_url}")
+        logger.debug(f"Calling Geocoding API for city: {city}")
         geo_response = requests.get(geo_url)
-        logging.debug(f"Geocoding Response Status: {geo_response.status_code}")
-        logging.debug(f"Geocoding Response: {geo_response.text}")
+        
+        if geo_response.status_code != 200:
+            logger.error(f"Geocoding API error. Status: {geo_response.status_code}, Response: {geo_response.text}")
+            return None, "Failed to get city coordinates. Please check the city name."
+            
         geo_data = geo_response.json()
         
         if not geo_data:
-            logging.warning("No geocoding data found for city")
-            return None
+            logger.warning(f"No geocoding data found for city: {city}")
+            return None, "City not found. Please check the spelling or try a different city."
             
         lat, lon = geo_data[0]['lat'], geo_data[0]['lon']
+        logger.debug(f"Got coordinates: lat={lat}, lon={lon}")
         
         # Get 7-day forecast
-        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}"
-        response = requests.get(url)
-        data = response.json()
+        forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}"
+        logger.debug("Calling Weather API")
+        response = requests.get(forecast_url)
         
         if response.status_code != 200:
-            logging.error(f"Failed to fetch weather data. Status code: {response.status_code}")
-            return None
+            logger.error(f"Weather API error. Status: {response.status_code}, Response: {response.text}")
+            return None, "Failed to fetch weather data. Please try again later."
             
+        data = response.json()
+        
         # Process forecast data
         forecasts = []
         seen_dates = set()
@@ -55,7 +66,7 @@ def get_weather_forecast(city):
                     'temp': kelvin_to_celsius(item['main']['temp']),
                     'feels_like': kelvin_to_celsius(item['main']['feels_like']),
                     'humidity': item['main']['humidity'],
-                    'description': item['weather'][0]['description'],
+                    'description': item['weather'][0]['description'].capitalize(),
                     'icon': item['weather'][0]['icon']
                 })
         
@@ -63,10 +74,14 @@ def get_weather_forecast(city):
             'city': geo_data[0]['name'],
             'country': geo_data[0]['country'],
             'forecasts': forecasts
-        }
+        }, None
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error: {str(e)}")
+        return None, "Network error. Please check your internet connection."
     except Exception as e:
-        logging.error(f"Error: {e}")
-        return None
+        logger.error(f"Unexpected error: {str(e)}")
+        return None, "An unexpected error occurred. Please try again later."
 
 @application.route('/')
 def index():
@@ -75,14 +90,15 @@ def index():
 @application.route('/get_weather', methods=['POST'])
 def get_weather():
     city = request.form.get('city')
-    logging.debug(f"Received request for city: {city}")
+    logger.debug(f"Received request for city: {city}")
     
     if not city:
-        return jsonify({'error': 'City is required'}), 400
+        return jsonify({'error': 'City name is required'}), 400
         
-    weather_data = get_weather_forecast(city)
+    weather_data, error_message = get_weather_forecast(city)
+    
     if weather_data is None:
-        return jsonify({'error': 'Unable to fetch weather data for the specified city'}), 400
+        return jsonify({'error': error_message or 'Unable to fetch weather data'}), 400
         
     return jsonify(weather_data)
 
